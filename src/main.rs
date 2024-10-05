@@ -5,6 +5,7 @@ use cursive::views::{
 };
 use cursive::{CbSink, Cursive};
 use cursive_table_view::{TableView, TableViewItem};
+use std::any::Any;
 use std::borrow::BorrowMut;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -74,10 +75,12 @@ impl TableViewItem<Column> for Row {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+type ComponentFn = dyn Fn(&mut React, &dyn Any) -> Option<Element>;
+
+#[derive(Clone)]
 pub enum ElementType {
     Button,
-    Component(fn(&mut React) -> Option<Element>),
+    Component(usize, Arc<ComponentFn>),
     Dialog,
     Hideable,
     HorizontalLayout,
@@ -85,6 +88,24 @@ pub enum ElementType {
     Table,
     VerticalLayout,
 }
+
+impl PartialEq for ElementType {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (ElementType::Button, ElementType::Button) => true,
+            (ElementType::Component(s, _), ElementType::Component(o, _)) => s == o,
+            (ElementType::Dialog, ElementType::Dialog) => true,
+            (ElementType::Hideable, ElementType::Hideable) => true,
+            (ElementType::HorizontalLayout, ElementType::HorizontalLayout) => true,
+            (ElementType::Panel, ElementType::Panel) => true,
+            (ElementType::Table, ElementType::Table) => true,
+            (ElementType::VerticalLayout, ElementType::VerticalLayout) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ElementType {}
 
 pub fn button(title: String, callback: Arc<Callback>) -> Element {
     Element::new(
@@ -94,7 +115,9 @@ pub fn button(title: String, callback: Arc<Callback>) -> Element {
 }
 
 pub fn component(function: fn(&mut React) -> Option<Element>) -> Element {
-    Element::new(ElementType::Component(function), Props::new())
+    let id = function as usize;
+    let function = Arc::new(move |react: &mut React, _: &dyn Any| function(react));
+    Element::new(ElementType::Component(id, function), Props::new())
 }
 
 pub fn dialog(title: &str, children: Vec<Element>) -> Element {
@@ -117,6 +140,21 @@ pub fn horizontal_layout(children: Vec<Element>) -> Element {
 
 pub fn panel(element: Element) -> Element {
     Element::new(ElementType::Panel, Props::new().children(vec![element]))
+}
+
+pub fn props_component<P>(function: fn(&mut React, &P) -> Option<Element>, props: P) -> Element
+where
+    P: 'static,
+{
+    let id = function as usize;
+    let function = Arc::new(move |react: &mut React, v: &dyn Any| {
+        let v = v.downcast_ref::<P>().unwrap();
+        function(react, v)
+    });
+    Element::new(
+        ElementType::Component(id, function),
+        Props::new().component_props(props),
+    )
 }
 
 pub fn table(
@@ -145,6 +183,7 @@ pub type Callback = dyn Fn(&mut Cursive) + Send + Sync;
 pub struct Props {
     pub children: Vec<Element>,
     pub columns: Option<Vec<Column>>,
+    pub component_props: Option<Arc<dyn Any>>,
     pub key: Option<String>,
     pub on_select: Option<Arc<Callback>>,
     pub on_submit: Option<Arc<Callback>>,
@@ -157,6 +196,7 @@ impl Props {
         Self {
             children: vec![],
             columns: None,
+            component_props: None,
             key: None,
             on_select: None,
             on_submit: None,
@@ -172,6 +212,14 @@ impl Props {
 
     pub fn columns(mut self, columns: Vec<Column>) -> Self {
         self.columns = Some(columns);
+        self
+    }
+
+    pub fn component_props<P>(mut self, props: P) -> Self
+    where
+        P: 'static,
+    {
+        self.component_props = Some(Arc::new(props));
         self
     }
 
@@ -201,22 +249,13 @@ impl Props {
     }
 }
 
-impl Debug for Props {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!(
-            "{:?}:{:?}:{:?}",
-            self.title, self.key, self.children
-        ))
-    }
-}
-
 impl Default for Props {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Element {
     pub element_type: ElementType,
     pub props: Props,
@@ -231,11 +270,14 @@ impl Element {
     }
 
     pub fn resolve(&self, react: &mut React, name: String) -> Option<Fiber> {
-        let element = match self.element_type {
-            ElementType::Component(component) => {
+        let element = match &self.element_type {
+            ElementType::Component(_, component) => {
                 react.element_key.clone_from(&name);
                 react.state_index = 0;
-                component(react)
+                match &self.props.component_props {
+                    Some(props) => component(react, props.as_ref()),
+                    None => component(react, &()),
+                }
             }
             _ => Some(self.clone()),
         };
@@ -261,7 +303,7 @@ impl Element {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Fiber {
     pub element: Element,
     pub children: Vec<Fiber>,
@@ -355,7 +397,7 @@ impl React {
                     move |s| (on_submit)(s),
                 ))
             }
-            ElementType::Component(_) => {
+            ElementType::Component(_, _) => {
                 panic!("Can't create view for component! How did you even get here?!")
             }
             ElementType::Dialog => {
@@ -457,7 +499,7 @@ impl React {
                     button.set_callback(move |s| (on_submit)(s));
                 }
             }
-            ElementType::Component(_) => {}
+            ElementType::Component(_, _) => {}
             ElementType::Dialog => {
                 let mut dialog = view.get_mut();
                 let dialog = dialog.get_mut::<Dialog>().unwrap();
@@ -700,19 +742,31 @@ impl Default for React {
 
 fn main() {
     let react = React::new();
-    react.render(component(sisko_app));
+    react.render(component(app));
 }
 
-fn app(_react: &mut React) -> Option<Element> {
-    Some(dialog("Test Title", vec![component(counter)]))
-}
-
-fn counter(react: &mut React) -> Option<Element> {
+fn app(react: &mut React) -> Option<Element> {
     let (count, set_count) = react.use_state(0);
-    Some(button(
-        format!("{}", count),
-        Arc::new(move |_| set_count(count + 1)),
+    Some(dialog(
+        "Test Title",
+        vec![props_component(
+            counter,
+            CounterProps {
+                count,
+                on_submit: Arc::new(move |_| set_count(count + 1)),
+            },
+        )],
     ))
+}
+
+struct CounterProps {
+    pub count: i32,
+    pub on_submit: Arc<Callback>,
+}
+
+fn counter(_react: &mut React, props: &CounterProps) -> Option<Element> {
+    let CounterProps { count, on_submit } = props;
+    Some(button(format!("{}", count), on_submit.clone()))
 }
 
 fn sisko_app(_: &mut React) -> Option<Element> {
