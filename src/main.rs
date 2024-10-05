@@ -394,10 +394,10 @@ impl React {
             }
             ElementType::Table => {
                 let mut table_view: TableView<Row, Column> = TableView::new();
-                for column in fiber.element.props.columns.clone().unwrap_or(vec![]) {
-                    let align = column.align.clone();
-                    let width = column.width.clone();
-                    table_view.add_column(column.clone(), column.name, move |c| {
+                for column in fiber.element.props.columns.clone().unwrap_or_default() {
+                    let align = column.align;
+                    let width = column.width;
+                    table_view.add_column(column, column.name, move |c| {
                         let mut c = c;
                         if let Some(align) = align {
                             c = c.align(align);
@@ -408,7 +408,7 @@ impl React {
                         c
                     });
                 }
-                for row in fiber.element.props.rows.clone().unwrap_or(vec![]) {
+                for row in fiber.element.props.rows.clone().unwrap_or_default() {
                     table_view.insert_item(row);
                 }
                 let on_select = fiber
@@ -617,7 +617,7 @@ impl React {
                     .as_ref()
                     .unwrap()
                     .iter()
-                    .filter(|row| updated.iter().find(|s| **s == row.id).is_none())
+                    .filter(|row| !updated.iter().any(|s| *s == row.id))
                 {
                     table.insert_item(new_row.clone());
                 }
