@@ -1,35 +1,203 @@
-use cursive::view::Nameable;
-use cursive::views::{BoxedView, Button, Dialog, DummyView, LinearLayout, NamedView};
+use cursive::align::HAlign;
+use cursive::view::{Nameable, Resizable};
+use cursive::views::{
+    BoxedView, Button, Dialog, DummyView, HideableView, LinearLayout, NamedView, Panel, ResizedView,
+};
 use cursive::{CbSink, Cursive};
+use cursive_table_view::{TableView, TableViewItem};
 use std::borrow::BorrowMut;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::{Arc, RwLock};
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Column {
+    pub name: &'static str,
+    pub align: Option<HAlign>,
+    pub cmp: Option<fn(&Row, &Row, Column) -> Ordering>,
+    pub width: Option<usize>,
+}
+
+impl Column {
+    pub fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            align: None,
+            cmp: None,
+            width: None,
+        }
+    }
+
+    pub fn align_right(mut self) -> Self {
+        self.align = Some(HAlign::Right);
+        self
+    }
+
+    pub fn width(mut self, width: usize) -> Self {
+        self.width = Some(width);
+        self
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Row {
+    data: HashMap<&'static str, String>,
+    id: String,
+}
+
+impl Row {
+    pub fn new(id: &str, data: HashMap<&'static str, String>) -> Self {
+        Self {
+            data,
+            id: String::from(id),
+        }
+    }
+}
+
+impl TableViewItem<Column> for Row {
+    fn to_column(&self, column: Column) -> String {
+        self.data.get(column.name).unwrap().clone()
+    }
+
+    fn cmp(&self, other: &Self, column: Column) -> Ordering
+    where
+        Self: Sized,
+    {
+        if let Some(compare_function) = column.cmp {
+            compare_function(self, other, column)
+        } else {
+            let s = self.data.get(column.name).unwrap();
+            let o = other.data.get(column.name).unwrap();
+            s.cmp(o)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ElementType {
     Button,
     Component(fn(&mut React) -> Option<Element>),
     Dialog,
+    Hideable,
+    HorizontalLayout,
+    Panel,
+    Table,
     VerticalLayout,
 }
+
+pub fn button(title: String, callback: Arc<Callback>) -> Element {
+    Element::new(
+        ElementType::Button,
+        Props::new().title(title).on_submit(callback),
+    )
+}
+
+pub fn component(function: fn(&mut React) -> Option<Element>) -> Element {
+    Element::new(ElementType::Component(function), Props::new())
+}
+
+pub fn dialog(title: &str, children: Vec<Element>) -> Element {
+    Element::new(
+        ElementType::Dialog,
+        Props::new().title(String::from(title)).children(children),
+    )
+}
+
+pub fn hideable(element: Element) -> Element {
+    Element::new(ElementType::Hideable, Props::new().children(vec![element]))
+}
+
+pub fn horizontal_layout(children: Vec<Element>) -> Element {
+    Element::new(
+        ElementType::HorizontalLayout,
+        Props::new().children(children),
+    )
+}
+
+pub fn panel(element: Element) -> Element {
+    Element::new(ElementType::Panel, Props::new().children(vec![element]))
+}
+
+pub fn table(
+    columns: Vec<Column>,
+    rows: Vec<Row>,
+    on_select: Arc<Callback>,
+    on_submit: Arc<Callback>,
+) -> Element {
+    Element::new(
+        ElementType::Table,
+        Props::new()
+            .columns(columns)
+            .rows(rows)
+            .on_select(on_select)
+            .on_submit(on_submit),
+    )
+}
+
+pub fn vertical_layout(children: Vec<Element>) -> Element {
+    Element::new(ElementType::VerticalLayout, Props::new().children(children))
+}
+
+pub type Callback = dyn Fn(&mut Cursive) + Send + Sync;
 
 #[derive(Clone)]
 pub struct Props {
     pub children: Vec<Element>,
-    pub title: String,
-    pub on_submit: Arc<dyn Fn(&mut Cursive) + Send + Sync>,
+    pub columns: Option<Vec<Column>>,
     pub key: Option<String>,
+    pub on_select: Option<Arc<Callback>>,
+    pub on_submit: Option<Arc<Callback>>,
+    pub rows: Option<Vec<Row>>,
+    pub title: Option<String>,
 }
 
 impl Props {
     pub fn new() -> Self {
         Self {
             children: vec![],
-            title: String::new(),
-            on_submit: Arc::new(|_| {}),
+            columns: None,
             key: None,
+            on_select: None,
+            on_submit: None,
+            rows: None,
+            title: None,
         }
+    }
+
+    pub fn children(mut self, children: Vec<Element>) -> Self {
+        self.children = children;
+        self
+    }
+
+    pub fn columns(mut self, columns: Vec<Column>) -> Self {
+        self.columns = Some(columns);
+        self
+    }
+
+    pub fn key(mut self, key: String) -> Self {
+        self.key = Some(key);
+        self
+    }
+
+    pub fn on_select(mut self, on_select: Arc<Callback>) -> Self {
+        self.on_select = Some(on_select);
+        self
+    }
+
+    pub fn on_submit(mut self, on_submit: Arc<Callback>) -> Self {
+        self.on_submit = Some(on_submit);
+        self
+    }
+
+    pub fn rows(mut self, rows: Vec<Row>) -> Self {
+        self.rows = Some(rows);
+        self
+    }
+
+    pub fn title(mut self, title: String) -> Self {
+        self.title = Some(title);
+        self
     }
 }
 
@@ -100,10 +268,12 @@ pub struct Fiber {
     pub name: String,
 }
 
+type StateValue = dyn std::any::Any + Send + Sync;
+
 pub struct React {
     element_key: String,
     state_index: usize,
-    state: Arc<RwLock<HashMap<String, Box<dyn std::any::Any + Send + Sync>>>>,
+    state: Arc<RwLock<HashMap<String, Box<StateValue>>>>,
     root: Option<Element>,
     old_root: Option<Fiber>,
     cb_sink: Option<CbSink>,
@@ -150,14 +320,14 @@ impl React {
                     Some(true) => {
                         // need to swap
                         s.pop_layer();
-                        s.add_layer(Self::create_view(new_root));
+                        s.add_fullscreen_layer(Self::create_view(new_root));
                     }
                     Some(false) => {
                         // updated, nothing else to do
                     }
                     None => {
                         // no existing root; create a new one
-                        s.add_layer(Self::create_view(new_root));
+                        s.add_fullscreen_layer(Self::create_view(new_root));
                     }
                 }
             }
@@ -174,10 +344,16 @@ impl React {
     fn create_view(fiber: &Fiber) -> NamedView<BoxedView> {
         match fiber.element.element_type {
             ElementType::Button => {
-                let on_submit = fiber.element.props.on_submit.clone();
-                BoxedView::boxed(Button::new(fiber.element.props.title.clone(), move |s| {
-                    (on_submit)(s)
-                }))
+                let on_submit = fiber
+                    .element
+                    .props
+                    .on_submit
+                    .clone()
+                    .unwrap_or(Arc::new(Cursive::noop));
+                BoxedView::boxed(Button::new(
+                    fiber.element.props.title.clone().unwrap_or_default(),
+                    move |s| (on_submit)(s),
+                ))
             }
             ElementType::Component(_) => {
                 panic!("Can't create view for component! How did you even get here?!")
@@ -188,7 +364,69 @@ impl React {
                     .first()
                     .map(Self::create_view)
                     .unwrap_or(BoxedView::boxed(DummyView::new()).with_name("dummy"));
-                BoxedView::boxed(Dialog::around(content).title(fiber.element.props.title.clone()))
+                BoxedView::boxed(
+                    Dialog::around(content)
+                        .title(fiber.element.props.title.clone().unwrap_or_default()),
+                )
+            }
+            ElementType::Hideable => {
+                let content = fiber
+                    .children
+                    .first()
+                    .map(Self::create_view)
+                    .unwrap_or(BoxedView::boxed(DummyView::new()).with_name("dummy"));
+                BoxedView::boxed(HideableView::new(content))
+            }
+            ElementType::HorizontalLayout => {
+                let mut layout = LinearLayout::horizontal();
+                for child_fiber in &fiber.children {
+                    layout.add_child(Self::create_view(child_fiber));
+                }
+                BoxedView::boxed(layout)
+            }
+            ElementType::Panel => {
+                let content = fiber
+                    .children
+                    .first()
+                    .map(Self::create_view)
+                    .unwrap_or(BoxedView::boxed(DummyView::new()).with_name("dummy"));
+                BoxedView::boxed(Panel::new(content))
+            }
+            ElementType::Table => {
+                let mut table_view: TableView<Row, Column> = TableView::new();
+                for column in fiber.element.props.columns.clone().unwrap_or(vec![]) {
+                    let align = column.align.clone();
+                    let width = column.width.clone();
+                    table_view.add_column(column.clone(), column.name, move |c| {
+                        let mut c = c;
+                        if let Some(align) = align {
+                            c = c.align(align);
+                        }
+                        if let Some(width) = width {
+                            c = c.width(width);
+                        }
+                        c
+                    });
+                }
+                for row in fiber.element.props.rows.clone().unwrap_or(vec![]) {
+                    table_view.insert_item(row);
+                }
+                let on_select = fiber
+                    .element
+                    .props
+                    .on_select
+                    .clone()
+                    .unwrap_or(Arc::new(Cursive::noop));
+                let on_submit = fiber
+                    .element
+                    .props
+                    .on_submit
+                    .clone()
+                    .unwrap_or(Arc::new(Cursive::noop));
+                // TODO: callbacks should receive ref to item
+                table_view.set_on_select(move |s, _, _| (on_select)(s));
+                table_view.set_on_submit(move |s, _, _| (on_submit)(s));
+                BoxedView::new(Box::new(table_view.full_screen()))
             }
             ElementType::VerticalLayout => {
                 let mut layout = LinearLayout::vertical();
@@ -207,14 +445,29 @@ impl React {
             ElementType::Button => {
                 let mut button = view.get_mut();
                 let button = button.get_mut::<Button>().unwrap();
-                button.set_label(new_fiber.element.props.title.clone());
-                let on_submit = new_fiber.element.props.on_submit.clone();
-                button.set_callback(move |s| (on_submit)(s));
+
+                if let Some(title) = &new_fiber.element.props.title {
+                    if button.label() != title.as_str() {
+                        button.set_label(title.clone());
+                    }
+                }
+
+                if let Some(on_submit) = &new_fiber.element.props.on_submit {
+                    let on_submit = on_submit.clone();
+                    button.set_callback(move |s| (on_submit)(s));
+                }
             }
+            ElementType::Component(_) => {}
             ElementType::Dialog => {
                 let mut dialog = view.get_mut();
                 let dialog = dialog.get_mut::<Dialog>().unwrap();
-                dialog.set_title(new_fiber.element.props.title.clone());
+
+                if let Some(title) = &new_fiber.element.props.title {
+                    if dialog.get_title() != title.as_str() {
+                        dialog.set_title(title.clone());
+                    }
+                }
+
                 if old_fiber.element.element_type == new_fiber.element.element_type {
                     let child_view = dialog
                         .get_content_mut()
@@ -241,8 +494,24 @@ impl React {
                     }
                 }
             }
-            ElementType::Component(_) => {}
-            ElementType::VerticalLayout => {
+            ElementType::Hideable => {
+                let old_child_fiber = old_fiber.children.first().unwrap();
+                let new_child_fiber = new_fiber.children.first().unwrap();
+                let mut hideable = view.get_mut();
+                let hideable = hideable
+                    .get_mut::<HideableView<NamedView<BoxedView>>>()
+                    .unwrap();
+                let child_view = hideable.get_inner_mut();
+                if old_child_fiber.element.element_type == new_child_fiber.element.element_type {
+                    // we have a matching old and new fiber of the same type, need to update
+                    Self::update_view(child_view, old_child_fiber, new_child_fiber);
+                } else {
+                    // we have an old and new fiber of diff types, need to swap
+                    let inner = hideable.get_inner_mut();
+                    *inner = Self::create_view(new_child_fiber);
+                }
+            }
+            ElementType::HorizontalLayout | ElementType::VerticalLayout => {
                 let old_fibers = &old_fiber.children;
                 let new_fibers = &new_fiber.children;
                 let mut layout = view.get_mut();
@@ -296,6 +565,79 @@ impl React {
                     }
                 }
             }
+            ElementType::Panel => {
+                let old_child_fiber = old_fiber.children.first().unwrap();
+                let new_child_fiber = new_fiber.children.first().unwrap();
+                let mut panel = view.get_mut();
+                let panel = panel.get_mut::<Panel<NamedView<BoxedView>>>().unwrap();
+                let child_view = panel.get_inner_mut();
+                if old_child_fiber.element.element_type == new_child_fiber.element.element_type {
+                    // we have a matching old and new fiber of the same type, need to update
+                    Self::update_view(child_view, old_child_fiber, new_child_fiber);
+                } else {
+                    // we have an old and new fiber of diff types, need to swap
+                    let inner = panel.get_inner_mut();
+                    *inner = Self::create_view(new_child_fiber);
+                }
+            }
+            ElementType::Table => {
+                let mut table = view.get_mut();
+                let table = table
+                    .get_mut::<ResizedView<TableView<Row, Column>>>()
+                    .unwrap();
+                let table = table.get_inner_mut();
+
+                // TODO: reconcile columns?
+                // reconcile rows
+                let mut to_remove: Vec<usize> = vec![];
+                let mut updated: Vec<String> = vec![];
+                for (index, item) in table.borrow_items_mut().iter_mut().enumerate() {
+                    let new_row = new_fiber
+                        .element
+                        .props
+                        .rows
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .find(|row| row.id == item.id);
+                    if let Some(new_row) = new_row {
+                        *item = new_row.clone();
+                        updated.push(new_row.id.clone());
+                    } else {
+                        to_remove.push(index);
+                    }
+                }
+                for index in to_remove {
+                    table.remove_item(index);
+                }
+                for new_row in new_fiber
+                    .element
+                    .props
+                    .rows
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .filter(|row| updated.iter().find(|s| **s == row.id).is_none())
+                {
+                    table.insert_item(new_row.clone());
+                }
+
+                // reconcile callbacks
+                let on_select = new_fiber
+                    .element
+                    .props
+                    .on_select
+                    .clone()
+                    .unwrap_or(Arc::new(Cursive::noop));
+                let on_submit = new_fiber
+                    .element
+                    .props
+                    .on_submit
+                    .clone()
+                    .unwrap_or(Arc::new(Cursive::noop));
+                table.set_on_select(move |s, _, _| (on_select)(s));
+                table.set_on_submit(move |s, _, _| (on_submit)(s));
+            }
         }
     }
 
@@ -315,9 +657,7 @@ impl React {
                 .write()
                 .unwrap()
                 .entry(key.clone())
-                .or_insert_with(|| {
-                    Box::new(initial_value.clone()) as Box<dyn std::any::Any + Send + Sync>
-                });
+                .or_insert_with(|| Box::new(initial_value.clone()) as Box<StateValue>);
         }
 
         let set_state = {
@@ -360,30 +700,77 @@ impl Default for React {
 
 fn main() {
     let react = React::new();
-    react.render(Element::new(ElementType::Component(app), Props::new()));
+    react.render(component(sisko_app));
 }
 
 fn app(_react: &mut React) -> Option<Element> {
-    Some(Element::new(
-        ElementType::Dialog,
-        Props {
-            title: String::from("Test Title"),
-            children: vec![Element::new(ElementType::Component(counter), Props::new())],
-            on_submit: Arc::new(|_| {}),
-            key: None,
-        },
-    ))
+    Some(dialog("Test Title", vec![component(counter)]))
 }
 
 fn counter(react: &mut React) -> Option<Element> {
     let (count, set_count) = react.use_state(0);
-    Some(Element::new(
-        ElementType::Button,
-        Props {
-            title: format!("{}", count),
-            children: vec![],
-            on_submit: Arc::new(move |_| set_count(count + 1)),
-            key: None,
-        },
+    Some(button(
+        format!("{}", count),
+        Arc::new(move |_| set_count(count + 1)),
     ))
+}
+
+fn sisko_app(_: &mut React) -> Option<Element> {
+    Some(vertical_layout(vec![
+        horizontal_layout(vec![component(left_panel), component(right_panel)]),
+        component(bottom_panel),
+        component(bottom_buttons),
+    ]))
+}
+
+fn left_panel(_: &mut React) -> Option<Element> {
+    Some(hideable(panel(table(
+        vec![],
+        vec![],
+        Arc::new(Cursive::noop),
+        Arc::new(Cursive::noop),
+    ))))
+}
+
+fn right_panel(_: &mut React) -> Option<Element> {
+    Some(hideable(panel(table(
+        vec![],
+        vec![],
+        Arc::new(Cursive::noop),
+        Arc::new(Cursive::noop),
+    ))))
+}
+
+fn bottom_panel(_: &mut React) -> Option<Element> {
+    Some(hideable(panel(table(
+        vec![
+            Column::new("Tag"),
+            Column::new("Original Value"),
+            Column::new("New Value"),
+        ],
+        vec![Row::new(
+            "0",
+            HashMap::from([
+                ("Tag", String::from("Test")),
+                ("Original Value", String::from("orig")),
+                ("New Value", String::from("new")),
+            ]),
+        )],
+        Arc::new(Cursive::noop),
+        Arc::new(Cursive::noop),
+    ))))
+}
+
+fn bottom_buttons(_: &mut React) -> Option<Element> {
+    Some(horizontal_layout(vec![
+        button(String::from("Add Folder"), Arc::new(Cursive::noop)),
+        button(String::from("Add Files"), Arc::new(Cursive::noop)),
+        button(String::from("Cluster"), Arc::new(Cursive::noop)),
+        button(String::from("Lookup"), Arc::new(Cursive::noop)),
+        button(String::from("Scan"), Arc::new(Cursive::noop)),
+        button(String::from("Save"), Arc::new(Cursive::noop)),
+        button(String::from("Info"), Arc::new(Cursive::noop)),
+        button(String::from("Remove"), Arc::new(Cursive::noop)),
+        button(String::from("Lookup CD"), Arc::new(Cursive::noop)),
+    ]))
 }
