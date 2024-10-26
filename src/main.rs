@@ -428,6 +428,7 @@ impl React {
     fn create_view(fiber: &Fiber) -> NamedView<BoxedView> {
         match fiber.element.element_type {
             ElementType::Button => {
+                eprintln!("button");
                 let on_submit = fiber
                     .element
                     .props
@@ -443,6 +444,7 @@ impl React {
                 panic!("Can't create view for component! How did you even get here?!")
             }
             ElementType::Dialog => {
+                eprintln!("dialog");
                 let content = fiber
                     .children
                     .first()
@@ -454,6 +456,7 @@ impl React {
                 )
             }
             ElementType::Hideable => {
+                eprintln!("hideable");
                 let content = fiber
                     .children
                     .first()
@@ -462,6 +465,7 @@ impl React {
                 BoxedView::boxed(HideableView::new(content))
             }
             ElementType::HorizontalLayout => {
+                eprintln!("horizontal");
                 let mut layout = LinearLayout::horizontal();
                 for child_fiber in &fiber.children {
                     layout.add_child(Self::create_view(child_fiber));
@@ -469,6 +473,7 @@ impl React {
                 BoxedView::boxed(layout)
             }
             ElementType::Panel => {
+                eprintln!("panel");
                 let content = fiber
                     .children
                     .first()
@@ -477,18 +482,16 @@ impl React {
                 BoxedView::boxed(Panel::new(content))
             }
             ElementType::Resized => {
+                eprintln!("resized");
                 let content = fiber
                     .children
                     .first()
                     .map(Self::create_view)
                     .unwrap_or(BoxedView::boxed(DummyView::new()).with_name("dummy"));
-                BoxedView::boxed(ResizedView::new(
-                    cursive::view::SizeConstraint::Full,
-                    cursive::view::SizeConstraint::Full,
-                    content,
-                ))
+                BoxedView::boxed(content.full_screen())
             }
             ElementType::Stack => {
+                eprintln!("stack");
                 let mut stack = StackView::new();
                 for child_fiber in &fiber.children {
                     stack.add_layer(Self::create_view(child_fiber));
@@ -496,6 +499,7 @@ impl React {
                 BoxedView::boxed(stack)
             }
             ElementType::Table => {
+                eprintln!("table");
                 let mut table_view: TableView<Row, Column> = TableView::new();
                 for column in fiber.element.props.columns.clone().unwrap_or_default() {
                     let align = column.align;
@@ -532,6 +536,7 @@ impl React {
                 BoxedView::new(Box::new(table_view.full_screen()))
             }
             ElementType::VerticalLayout => {
+                eprintln!("vertical");
                 let mut layout = LinearLayout::vertical();
                 for child_fiber in &fiber.children {
                     layout.add_child(Self::create_view(child_fiber));
@@ -546,6 +551,7 @@ impl React {
         // this is where we loop over children and recurse
         match old_fiber.element.element_type {
             ElementType::Button => {
+                eprintln!("ubotton");
                 let mut button = view.get_mut();
                 let button = button.get_mut::<Button>().unwrap();
 
@@ -562,6 +568,8 @@ impl React {
             }
             ElementType::Component(_, _) => {}
             ElementType::Dialog => {
+                eprintln!("{}", view.name());
+                eprintln!("udialog");
                 let mut dialog = view.get_mut();
                 let dialog = dialog.get_mut::<Dialog>().unwrap();
 
@@ -583,14 +591,15 @@ impl React {
                         dialog.set_content(BoxedView::boxed(DummyView::new()).with_name("dummy"));
                     }
                     FiberComparison::Added | FiberComparison::Replaced => {
-                        dialog.set_content(Self::create_view(new_fiber));
+                        dialog.set_content(Self::create_view(new_child_fiber.unwrap()));
                     }
                     FiberComparison::Updated => {
-                        Self::update_view(child_view, old_fiber, new_fiber);
+                        Self::update_view(child_view, old_child_fiber.unwrap(), new_child_fiber.unwrap());
                     }
                 }
             }
             ElementType::Hideable => {
+                eprintln!("uhideable");
                 let old_child_fiber = old_fiber.children.first().unwrap();
                 let new_child_fiber = new_fiber.children.first().unwrap();
                 let mut hideable = view.get_mut();
@@ -608,6 +617,7 @@ impl React {
                 }
             }
             ElementType::HorizontalLayout | ElementType::VerticalLayout => {
+                eprintln!("ulayout");
                 let old_fibers = &old_fiber.children;
                 let new_fibers = &new_fiber.children;
                 let mut layout = view.get_mut();
@@ -664,6 +674,7 @@ impl React {
                 }
             }
             ElementType::Panel => {
+                eprintln!("upanel");
                 let old_child_fiber = old_fiber.children.first().unwrap();
                 let new_child_fiber = new_fiber.children.first().unwrap();
                 let mut panel = view.get_mut();
@@ -679,23 +690,33 @@ impl React {
                 }
             }
             ElementType::Resized => {
-                let old_child_fiber = old_fiber.children.first().unwrap();
-                let new_child_fiber = new_fiber.children.first().unwrap();
+                eprintln!("uresized");
                 let mut resized = view.get_mut();
                 let resized = resized
                     .get_mut::<ResizedView<NamedView<BoxedView>>>()
                     .unwrap();
-                let child_view = resized.get_inner_mut();
-                if old_child_fiber.element.element_type == new_child_fiber.element.element_type {
-                    // we have a matching old and new fiber of the same type, need to update
-                    Self::update_view(child_view, old_child_fiber, new_child_fiber);
-                } else {
-                    // we have an old and new fiber of diff types, need to swap
-                    let inner = resized.get_inner_mut();
-                    *inner = Self::create_view(new_child_fiber);
+
+                let old_child_fiber = old_fiber.children.first();
+                let new_child_fiber = new_fiber.children.first();
+                match old_child_fiber.compare(&new_child_fiber) {
+                    FiberComparison::None => {}
+                    FiberComparison::Removed => {
+                        let inner = resized.get_inner_mut();
+                        *inner = BoxedView::boxed(DummyView::new()).with_name("dummy");
+                    }
+                    FiberComparison::Added | FiberComparison::Replaced => {
+                        let inner = resized.get_inner_mut();
+                        *inner = Self::create_view(new_child_fiber.unwrap());
+                    }
+                    FiberComparison::Updated => {
+                        let child_view = resized
+                            .get_inner_mut();
+                        Self::update_view(child_view, old_child_fiber.unwrap(), new_child_fiber.unwrap());
+                    }
                 }
             }
             ElementType::Stack => {
+                eprintln!("ustack");
                 let old_fibers = &old_fiber.children;
                 let new_fibers = &new_fiber.children;
                 let mut stack = view.get_mut();
@@ -756,6 +777,7 @@ impl React {
                 }
             }
             ElementType::Table => {
+                eprintln!("utable");
                 let mut table = view.get_mut();
                 let table = table
                     .get_mut::<ResizedView<TableView<Row, Column>>>()
@@ -976,20 +998,22 @@ fn bottom_buttons(_: &mut React) -> Option<Element> {
 fn stack_app(react: &mut React) -> Option<Element> {
     let (count, set_count) = react.use_state(0);
     let set_count_b = set_count.clone();
-    let dialog_a = resized(dialog(
+    let mut dialog_a = resized(dialog(
         "Dialog A",
         vec![button(
             String::from("Swap"),
             Arc::new(move |_| set_count(1)),
         )],
     ));
-    let dialog_b = resized(dialog(
+    let mut dialog_b = resized(dialog(
         "Dialog B",
         vec![button(
             String::from("Swap"),
             Arc::new(move |_| set_count_b(0)),
         )],
     ));
+    dialog_a.props.key = Some("dialog_a".to_string());
+    dialog_b.props.key = Some("dialog_b".to_string());
     let layers = if count == 0 {
         vec![dialog_b, dialog_a]
     } else {
