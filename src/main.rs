@@ -1,7 +1,8 @@
 use cursive::align::HAlign;
 use cursive::view::{Nameable, Resizable};
 use cursive::views::{
-    BoxedView, Button, Dialog, DummyView, HideableView, LinearLayout, NamedView, Panel, ResizedView,
+    BoxedView, Button, Dialog, DummyView, HideableView, LayerPosition, LinearLayout, NamedView,
+    Panel, ResizedView, StackView,
 };
 use cursive::{CbSink, Cursive};
 use cursive_table_view::{TableView, TableViewItem};
@@ -85,6 +86,8 @@ pub enum ElementType {
     Hideable,
     HorizontalLayout,
     Panel,
+    Resized,
+    Stack,
     Table,
     VerticalLayout,
 }
@@ -98,6 +101,8 @@ impl PartialEq for ElementType {
             (ElementType::Hideable, ElementType::Hideable) => true,
             (ElementType::HorizontalLayout, ElementType::HorizontalLayout) => true,
             (ElementType::Panel, ElementType::Panel) => true,
+            (ElementType::Resized, ElementType::Resized) => true,
+            (ElementType::Stack, ElementType::Stack) => true,
             (ElementType::Table, ElementType::Table) => true,
             (ElementType::VerticalLayout, ElementType::VerticalLayout) => true,
             _ => false,
@@ -155,6 +160,14 @@ where
         ElementType::Component(id, function),
         Props::new().component_props(props),
     )
+}
+
+pub fn resized(child: Element) -> Element {
+    Element::new(ElementType::Resized, Props::new().children(vec![child]))
+}
+
+pub fn stack(children: Vec<Element>) -> Element {
+    Element::new(ElementType::Stack, Props::new().children(children))
 }
 
 pub fn table(
@@ -303,6 +316,35 @@ impl Element {
     }
 }
 
+pub enum FiberComparison {
+    Added,
+    None,
+    Removed,
+    Replaced,
+    Updated,
+}
+
+pub trait OptionFiberExtensions {
+    fn compare(&self, other: &Option<&Fiber>) -> FiberComparison;
+}
+
+impl OptionFiberExtensions for Option<&Fiber> {
+    fn compare(&self, other: &Option<&Fiber>) -> FiberComparison {
+        match (self, other) {
+            (Some(old_fiber), Some(new_fiber)) => {
+                if old_fiber.element.element_type == new_fiber.element.element_type {
+                    FiberComparison::Updated
+                } else {
+                    FiberComparison::Replaced
+                }
+            }
+            (None, None) => FiberComparison::None,
+            (None, Some(_)) => FiberComparison::Added,
+            (Some(_), None) => FiberComparison::Removed,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Fiber {
     pub element: Element,
@@ -434,6 +476,25 @@ impl React {
                     .unwrap_or(BoxedView::boxed(DummyView::new()).with_name("dummy"));
                 BoxedView::boxed(Panel::new(content))
             }
+            ElementType::Resized => {
+                let content = fiber
+                    .children
+                    .first()
+                    .map(Self::create_view)
+                    .unwrap_or(BoxedView::boxed(DummyView::new()).with_name("dummy"));
+                BoxedView::boxed(ResizedView::new(
+                    cursive::view::SizeConstraint::Full,
+                    cursive::view::SizeConstraint::Full,
+                    content,
+                ))
+            }
+            ElementType::Stack => {
+                let mut stack = StackView::new();
+                for child_fiber in &fiber.children {
+                    stack.add_layer(Self::create_view(child_fiber));
+                }
+                BoxedView::boxed(stack)
+            }
             ElementType::Table => {
                 let mut table_view: TableView<Row, Column> = TableView::new();
                 for column in fiber.element.props.columns.clone().unwrap_or_default() {
@@ -510,29 +571,22 @@ impl React {
                     }
                 }
 
-                if old_fiber.element.element_type == new_fiber.element.element_type {
-                    let child_view = dialog
-                        .get_content_mut()
-                        .downcast_mut::<NamedView<BoxedView>>()
-                        .unwrap();
-                    let old_child_fiber = old_fiber.children.first();
-                    let new_child_fiber = new_fiber.children.first();
-                    match (old_child_fiber, new_child_fiber) {
-                        (Some(old_fiber), Some(new_fiber)) => {
-                            if old_fiber.element.element_type == new_fiber.element.element_type {
-                                Self::update_view(child_view, old_fiber, new_fiber);
-                            } else {
-                                dialog.set_content(Self::create_view(new_fiber));
-                            }
-                        }
-                        (None, None) => {}
-                        (None, Some(new_fiber)) => {
-                            dialog.set_content(Self::create_view(new_fiber));
-                        }
-                        (Some(_), None) => {
-                            dialog
-                                .set_content(BoxedView::boxed(DummyView::new()).with_name("dummy"));
-                        }
+                let child_view = dialog
+                    .get_content_mut()
+                    .downcast_mut::<NamedView<BoxedView>>()
+                    .unwrap();
+                let old_child_fiber = old_fiber.children.first();
+                let new_child_fiber = new_fiber.children.first();
+                match old_child_fiber.compare(&new_child_fiber) {
+                    FiberComparison::None => {}
+                    FiberComparison::Removed => {
+                        dialog.set_content(BoxedView::boxed(DummyView::new()).with_name("dummy"));
+                    }
+                    FiberComparison::Added | FiberComparison::Replaced => {
+                        dialog.set_content(Self::create_view(new_fiber));
+                    }
+                    FiberComparison::Updated => {
+                        Self::update_view(child_view, old_fiber, new_fiber);
                     }
                 }
             }
@@ -565,32 +619,34 @@ impl React {
                         .unwrap()
                         .downcast_mut::<NamedView<BoxedView>>()
                         .unwrap();
-                    if let Some(old_child_fiber) = old_fibers
+                    let old_child_fiber = old_fibers
                         .iter()
-                        .find(|f| f.name.as_str() == child_view.name())
-                    {
-                        if let Some(new_child_fiber) = new_fibers
-                            .iter()
-                            .find(|f| f.name.as_str() == child_view.name())
-                        {
-                            if old_child_fiber.element.element_type
-                                == new_child_fiber.element.element_type
-                            {
-                                // we have a matching old and new fiber of the same type, need to update
-                                Self::update_view(child_view, old_child_fiber, new_child_fiber);
-                            } else {
-                                // we have an old and new fiber of diff types, need to swap
-                                to_remove.push(i);
-                                let new_view = Self::create_view(new_child_fiber);
-                                layout.add_child(new_view);
-                            }
-                        } else {
-                            // we have an old fiber but not a new one, need to remove
+                        .find(|f| f.name.as_str() == child_view.name());
+                    let new_child_fiber = new_fibers
+                        .iter()
+                        .find(|f| f.name.as_str() == child_view.name());
+                    match old_child_fiber.compare(&new_child_fiber) {
+                        FiberComparison::Added
+                        | FiberComparison::None
+                        | FiberComparison::Removed => {
+                            // no old fiber for existing view, need to remove
+                            // or we have an old fiber but not a new one, need to remove
                             to_remove.push(i);
                         }
-                    } else {
-                        // no old fiber for existing view, need to remove
-                        to_remove.push(i);
+                        FiberComparison::Replaced => {
+                            // we have an old and new fiber of diff types, need to swap
+                            to_remove.push(i);
+                            let new_view = Self::create_view(new_child_fiber.unwrap());
+                            layout.add_child(new_view);
+                        }
+                        FiberComparison::Updated => {
+                            // we have a matching old and new fiber of the same type, need to update
+                            Self::update_view(
+                                child_view,
+                                old_child_fiber.unwrap(),
+                                new_child_fiber.unwrap(),
+                            );
+                        }
                     }
                 }
 
@@ -620,6 +676,83 @@ impl React {
                     // we have an old and new fiber of diff types, need to swap
                     let inner = panel.get_inner_mut();
                     *inner = Self::create_view(new_child_fiber);
+                }
+            }
+            ElementType::Resized => {
+                let old_child_fiber = old_fiber.children.first().unwrap();
+                let new_child_fiber = new_fiber.children.first().unwrap();
+                let mut resized = view.get_mut();
+                let resized = resized
+                    .get_mut::<ResizedView<NamedView<BoxedView>>>()
+                    .unwrap();
+                let child_view = resized.get_inner_mut();
+                if old_child_fiber.element.element_type == new_child_fiber.element.element_type {
+                    // we have a matching old and new fiber of the same type, need to update
+                    Self::update_view(child_view, old_child_fiber, new_child_fiber);
+                } else {
+                    // we have an old and new fiber of diff types, need to swap
+                    let inner = resized.get_inner_mut();
+                    *inner = Self::create_view(new_child_fiber);
+                }
+            }
+            ElementType::Stack => {
+                let old_fibers = &old_fiber.children;
+                let new_fibers = &new_fiber.children;
+                let mut stack = view.get_mut();
+                let stack = stack.get_mut::<StackView>().unwrap();
+                for i in 0..new_fibers.len() {
+                    let new_fiber = &new_fibers[i];
+                    let old_fiber = old_fibers.iter().find(|f| f.name == new_fiber.name);
+                    let current_index = stack.find_layer_from_name(new_fiber.name.as_str());
+                    match current_index {
+                        Some(position) => {
+                            // layer is in the ui, make sure it's ordered right and update
+                            let current_index = match position {
+                                LayerPosition::FromBack(i) => i,
+                                LayerPosition::FromFront(i) => new_fibers.len() - i - 1,
+                            };
+                            if current_index != i {
+                                stack.move_layer(
+                                    LayerPosition::FromBack(current_index),
+                                    LayerPosition::FromBack(i),
+                                );
+                            }
+
+                            let layer = stack
+                                .get_mut(LayerPosition::FromBack(i))
+                                .unwrap()
+                                .downcast_mut::<NamedView<BoxedView>>()
+                                .unwrap();
+                            match old_fiber.compare(&Some(new_fiber)) {
+                                FiberComparison::None | FiberComparison::Removed => {}
+                                FiberComparison::Added | FiberComparison::Replaced => {
+                                    stack.remove_layer(LayerPosition::FromBack(i));
+                                    stack.add_layer(Self::create_view(new_fiber));
+                                    stack.move_layer(
+                                        LayerPosition::FromFront(0),
+                                        LayerPosition::FromBack(i),
+                                    );
+                                }
+                                FiberComparison::Updated => {
+                                    Self::update_view(layer, old_fiber.unwrap(), new_fiber)
+                                }
+                            }
+                        }
+                        None => {
+                            // layer is not in the ui; create and insert
+                            stack.add_layer(Self::create_view(new_fiber));
+                            stack.move_layer(
+                                LayerPosition::FromFront(0),
+                                LayerPosition::FromBack(i),
+                            );
+                        }
+                    }
+                }
+
+                if stack.len() > new_fibers.len() {
+                    for _ in new_fibers.len()..stack.len() {
+                        stack.remove_layer(LayerPosition::FromBack(new_fibers.len()));
+                    }
                 }
             }
             ElementType::Table => {
@@ -683,13 +816,15 @@ impl React {
         }
     }
 
-    pub fn use_state<T>(&mut self, initial_value: T) -> (T, Arc<dyn Fn(T) + Send + Sync>)
+    pub fn use_context<T>(
+        &mut self,
+        key: String,
+        initial_value: T,
+    ) -> (T, Arc<dyn Fn(T) + Send + Sync>)
     where
         T: Clone + Send + Sync + 'static,
     {
         let cb_sink = self.cb_sink.as_ref().unwrap().clone();
-        let key = format!("{}.{}", self.element_key, self.state_index);
-        self.state_index += 1;
         let state = Arc::clone(&self.state);
 
         // Set initial value if it doesn't exist
@@ -732,6 +867,15 @@ impl React {
 
         (current_value, set_state)
     }
+
+    pub fn use_state<T>(&mut self, initial_value: T) -> (T, Arc<dyn Fn(T) + Send + Sync>)
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        let key = format!("{}.{}", self.element_key, self.state_index);
+        self.state_index += 1;
+        self.use_context(key, initial_value)
+    }
 }
 
 impl Default for React {
@@ -742,12 +886,12 @@ impl Default for React {
 
 fn main() {
     let react = React::new();
-    react.render(component(app));
+    react.render(component(stack_app));
 }
 
 fn app(react: &mut React) -> Option<Element> {
     let (count, set_count) = react.use_state(0);
-    Some(dialog(
+    Some(stack(vec![dialog(
         "Test Title",
         vec![props_component(
             counter,
@@ -756,7 +900,7 @@ fn app(react: &mut React) -> Option<Element> {
                 on_submit: Arc::new(move |_| set_count(count + 1)),
             },
         )],
-    ))
+    )]))
 }
 
 struct CounterProps {
@@ -827,4 +971,29 @@ fn bottom_buttons(_: &mut React) -> Option<Element> {
         button(String::from("Remove"), Arc::new(Cursive::noop)),
         button(String::from("Lookup CD"), Arc::new(Cursive::noop)),
     ]))
+}
+
+fn stack_app(react: &mut React) -> Option<Element> {
+    let (count, set_count) = react.use_state(0);
+    let set_count_b = set_count.clone();
+    let dialog_a = resized(dialog(
+        "Dialog A",
+        vec![button(
+            String::from("Swap"),
+            Arc::new(move |_| set_count(1)),
+        )],
+    ));
+    let dialog_b = resized(dialog(
+        "Dialog B",
+        vec![button(
+            String::from("Swap"),
+            Arc::new(move |_| set_count_b(0)),
+        )],
+    ));
+    let layers = if count == 0 {
+        vec![dialog_b, dialog_a]
+    } else {
+        vec![dialog_a, dialog_b]
+    };
+    Some(stack(layers))
 }
