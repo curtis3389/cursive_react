@@ -1,8 +1,9 @@
 use cursive::align::HAlign;
+use cursive::menu::Tree;
 use cursive::view::{Nameable, Resizable};
 use cursive::views::{
-    BoxedView, Button, Dialog, DummyView, HideableView, LayerPosition, LinearLayout, NamedView,
-    Panel, ResizedView, StackView,
+    BoxedView, Button, Dialog, DummyView, HideableView, LayerPosition, LinearLayout, Menubar,
+    NamedView, Panel, ResizedView, StackView,
 };
 use cursive::{CbSink, Cursive};
 use cursive_table_view::{TableView, TableViewItem};
@@ -76,19 +77,24 @@ impl TableViewItem<Column> for Row {
     }
 }
 
-type ComponentFn = dyn Fn(&mut React, &dyn Any) -> Option<Element>;
+type ComponentFn = dyn Fn(&mut React, &dyn Any) -> Option<Element> + Send + Sync;
 
 #[derive(Clone)]
 pub enum ElementType {
     Button,
     Component(usize, Arc<ComponentFn>),
     Dialog,
+    FullscreenLayer,
     Hideable,
     HorizontalLayout,
+    Layer,
+    Leaf,
+    Menubar,
     Panel,
     Resized,
     Stack,
     Table,
+    Tree,
     VerticalLayout,
 }
 
@@ -98,12 +104,17 @@ impl PartialEq for ElementType {
             (ElementType::Button, ElementType::Button) => true,
             (ElementType::Component(s, _), ElementType::Component(o, _)) => s == o,
             (ElementType::Dialog, ElementType::Dialog) => true,
+            (ElementType::FullscreenLayer, ElementType::FullscreenLayer) => true,
             (ElementType::Hideable, ElementType::Hideable) => true,
             (ElementType::HorizontalLayout, ElementType::HorizontalLayout) => true,
+            (ElementType::Layer, ElementType::Layer) => true,
+            (ElementType::Leaf, ElementType::Leaf) => true,
+            (ElementType::Menubar, ElementType::Menubar) => true,
             (ElementType::Panel, ElementType::Panel) => true,
             (ElementType::Resized, ElementType::Resized) => true,
             (ElementType::Stack, ElementType::Stack) => true,
             (ElementType::Table, ElementType::Table) => true,
+            (ElementType::Tree, ElementType::Tree) => true,
             (ElementType::VerticalLayout, ElementType::VerticalLayout) => true,
             _ => false,
         }
@@ -132,6 +143,13 @@ pub fn dialog(title: &str, children: Vec<Element>) -> Element {
     )
 }
 
+pub fn fullscreen_layer(element: Element) -> Element {
+    Element::new(
+        ElementType::FullscreenLayer,
+        Props::new().children(vec![element]),
+    )
+}
+
 pub fn hideable(element: Element) -> Element {
     Element::new(ElementType::Hideable, Props::new().children(vec![element]))
 }
@@ -143,13 +161,21 @@ pub fn horizontal_layout(children: Vec<Element>) -> Element {
     )
 }
 
+pub fn layer(element: Element) -> Element {
+    Element::new(ElementType::Layer, Props::new().children(vec![element]))
+}
+
+pub fn menubar(children: Vec<Element>) -> Element {
+    Element::new(ElementType::Menubar, Props::new().children(children))
+}
+
 pub fn panel(element: Element) -> Element {
     Element::new(ElementType::Panel, Props::new().children(vec![element]))
 }
 
 pub fn props_component<P>(function: fn(&mut React, &P) -> Option<Element>, props: P) -> Element
 where
-    P: 'static,
+    P: 'static + Send + Sync,
 {
     let id = function as usize;
     let function = Arc::new(move |react: &mut React, v: &dyn Any| {
@@ -164,6 +190,20 @@ where
 
 pub fn resized(child: Element) -> Element {
     Element::new(ElementType::Resized, Props::new().children(vec![child]))
+}
+
+pub fn tree(label: &str, items: Vec<Element>) -> Element {
+    Element::new(
+        ElementType::Tree,
+        Props::new().children(items).title(label.to_string()),
+    )
+}
+
+pub fn leaf(label: &str, callback: Arc<Callback>) -> Element {
+    Element::new(
+        ElementType::Leaf,
+        Props::new().on_submit(callback).title(label.to_string()),
+    )
 }
 
 pub fn stack(children: Vec<Element>) -> Element {
@@ -196,7 +236,7 @@ pub type Callback = dyn Fn(&mut Cursive) + Send + Sync;
 pub struct Props {
     pub children: Vec<Element>,
     pub columns: Option<Vec<Column>>,
-    pub component_props: Option<Arc<dyn Any>>,
+    pub component_props: Option<Arc<dyn Any + Send + Sync>>,
     pub key: Option<String>,
     pub on_select: Option<Arc<Callback>>,
     pub on_submit: Option<Arc<Callback>>,
@@ -230,7 +270,7 @@ impl Props {
 
     pub fn component_props<P>(mut self, props: P) -> Self
     where
-        P: 'static,
+        P: 'static + Send + Sync,
     {
         self.component_props = Some(Arc::new(props));
         self
@@ -428,7 +468,6 @@ impl React {
     fn create_view(fiber: &Fiber) -> NamedView<BoxedView> {
         match fiber.element.element_type {
             ElementType::Button => {
-                eprintln!("button");
                 let on_submit = fiber
                     .element
                     .props
@@ -444,7 +483,6 @@ impl React {
                 panic!("Can't create view for component! How did you even get here?!")
             }
             ElementType::Dialog => {
-                eprintln!("dialog");
                 let content = fiber
                     .children
                     .first()
@@ -456,7 +494,6 @@ impl React {
                 )
             }
             ElementType::Hideable => {
-                eprintln!("hideable");
                 let content = fiber
                     .children
                     .first()
@@ -465,15 +502,91 @@ impl React {
                 BoxedView::boxed(HideableView::new(content))
             }
             ElementType::HorizontalLayout => {
-                eprintln!("horizontal");
                 let mut layout = LinearLayout::horizontal();
                 for child_fiber in &fiber.children {
                     layout.add_child(Self::create_view(child_fiber));
                 }
                 BoxedView::boxed(layout)
             }
+            ElementType::FullscreenLayer | ElementType::Layer => {
+                panic!("Can't render a layer directly! Layers must be children of stacks!")
+            }
+            ElementType::Menubar => {
+                fn to_tree(fibers: &Vec<Fiber>) -> Tree {
+                    let mut tree = Tree::new();
+                    for fiber in fibers {
+                        match fiber.element.element_type {
+                            ElementType::Leaf => {
+                                let on_submit = fiber
+                                    .element
+                                    .props
+                                    .on_submit
+                                    .clone()
+                                    .unwrap_or(Arc::new(Cursive::noop));
+                                tree.add_leaf(
+                                    fiber
+                                        .element
+                                        .props
+                                        .title
+                                        .clone()
+                                        .unwrap_or("<blank>".to_string()),
+                                    move |s| (on_submit)(s),
+                                );
+                            }
+                            ElementType::Tree => {
+                                tree.add_subtree(
+                                    fiber
+                                        .element
+                                        .props
+                                        .title
+                                        .clone()
+                                        .unwrap_or("<blank>".to_string()),
+                                    to_tree(&fiber.children),
+                                );
+                            }
+                            _ => panic!(),
+                        }
+                    }
+                    tree
+                }
+
+                let mut menubar = Menubar::new();
+                for child in &fiber.children {
+                    match child.element.element_type {
+                        ElementType::Leaf => {
+                            let on_submit = child
+                                .element
+                                .props
+                                .on_submit
+                                .clone()
+                                .unwrap_or(Arc::new(Cursive::noop));
+                            menubar.add_leaf(
+                                child
+                                    .element
+                                    .props
+                                    .title
+                                    .clone()
+                                    .unwrap_or("<blank>".to_string()),
+                                move |s| (on_submit)(s),
+                            );
+                        }
+                        ElementType::Tree => {
+                            menubar.add_subtree(
+                                child
+                                    .element
+                                    .props
+                                    .title
+                                    .clone()
+                                    .unwrap_or("<blank>".to_string()),
+                                to_tree(&child.children),
+                            );
+                        }
+                        _ => panic!(),
+                    }
+                }
+                BoxedView::boxed(menubar)
+            }
             ElementType::Panel => {
-                eprintln!("panel");
                 let content = fiber
                     .children
                     .first()
@@ -482,7 +595,6 @@ impl React {
                 BoxedView::boxed(Panel::new(content))
             }
             ElementType::Resized => {
-                eprintln!("resized");
                 let content = fiber
                     .children
                     .first()
@@ -491,15 +603,25 @@ impl React {
                 BoxedView::boxed(content.full_screen())
             }
             ElementType::Stack => {
-                eprintln!("stack");
                 let mut stack = StackView::new();
                 for child_fiber in &fiber.children {
-                    stack.add_layer(Self::create_view(child_fiber));
+                    match child_fiber.element.element_type {
+                        ElementType::Layer => {
+                            stack.add_layer(Self::create_view(
+                                child_fiber.children.first().unwrap(),
+                            ));
+                        }
+                        ElementType::FullscreenLayer => {
+                            stack.add_fullscreen_layer(Self::create_view(
+                                child_fiber.children.first().unwrap(),
+                            ));
+                        }
+                        _ => panic!("Children of stacks must be layers!"),
+                    }
                 }
                 BoxedView::boxed(stack)
             }
             ElementType::Table => {
-                eprintln!("table");
                 let mut table_view: TableView<Row, Column> = TableView::new();
                 for column in fiber.element.props.columns.clone().unwrap_or_default() {
                     let align = column.align;
@@ -536,13 +658,13 @@ impl React {
                 BoxedView::new(Box::new(table_view.full_screen()))
             }
             ElementType::VerticalLayout => {
-                eprintln!("vertical");
                 let mut layout = LinearLayout::vertical();
                 for child_fiber in &fiber.children {
                     layout.add_child(Self::create_view(child_fiber));
                 }
                 BoxedView::boxed(layout)
             }
+            ElementType::Leaf | ElementType::Tree => todo!(),
         }
         .with_name(fiber.name.clone())
     }
@@ -551,7 +673,6 @@ impl React {
         // this is where we loop over children and recurse
         match old_fiber.element.element_type {
             ElementType::Button => {
-                eprintln!("ubotton");
                 let mut button = view.get_mut();
                 let button = button.get_mut::<Button>().unwrap();
 
@@ -568,8 +689,6 @@ impl React {
             }
             ElementType::Component(_, _) => {}
             ElementType::Dialog => {
-                eprintln!("{}", view.name());
-                eprintln!("udialog");
                 let mut dialog = view.get_mut();
                 let dialog = dialog.get_mut::<Dialog>().unwrap();
 
@@ -594,12 +713,15 @@ impl React {
                         dialog.set_content(Self::create_view(new_child_fiber.unwrap()));
                     }
                     FiberComparison::Updated => {
-                        Self::update_view(child_view, old_child_fiber.unwrap(), new_child_fiber.unwrap());
+                        Self::update_view(
+                            child_view,
+                            old_child_fiber.unwrap(),
+                            new_child_fiber.unwrap(),
+                        );
                     }
                 }
             }
             ElementType::Hideable => {
-                eprintln!("uhideable");
                 let old_child_fiber = old_fiber.children.first().unwrap();
                 let new_child_fiber = new_fiber.children.first().unwrap();
                 let mut hideable = view.get_mut();
@@ -617,7 +739,6 @@ impl React {
                 }
             }
             ElementType::HorizontalLayout | ElementType::VerticalLayout => {
-                eprintln!("ulayout");
                 let old_fibers = &old_fiber.children;
                 let new_fibers = &new_fiber.children;
                 let mut layout = view.get_mut();
@@ -673,8 +794,10 @@ impl React {
                     }
                 }
             }
+            ElementType::FullscreenLayer | ElementType::Layer => {
+                panic!("Can't render a layer directly! Layers must be children of stacks!")
+            }
             ElementType::Panel => {
-                eprintln!("upanel");
                 let old_child_fiber = old_fiber.children.first().unwrap();
                 let new_child_fiber = new_fiber.children.first().unwrap();
                 let mut panel = view.get_mut();
@@ -690,7 +813,6 @@ impl React {
                 }
             }
             ElementType::Resized => {
-                eprintln!("uresized");
                 let mut resized = view.get_mut();
                 let resized = resized
                     .get_mut::<ResizedView<NamedView<BoxedView>>>()
@@ -709,14 +831,16 @@ impl React {
                         *inner = Self::create_view(new_child_fiber.unwrap());
                     }
                     FiberComparison::Updated => {
-                        let child_view = resized
-                            .get_inner_mut();
-                        Self::update_view(child_view, old_child_fiber.unwrap(), new_child_fiber.unwrap());
+                        let child_view = resized.get_inner_mut();
+                        Self::update_view(
+                            child_view,
+                            old_child_fiber.unwrap(),
+                            new_child_fiber.unwrap(),
+                        );
                     }
                 }
             }
             ElementType::Stack => {
-                eprintln!("ustack");
                 let old_fibers = &old_fiber.children;
                 let new_fibers = &new_fiber.children;
                 let mut stack = view.get_mut();
@@ -748,7 +872,19 @@ impl React {
                                 FiberComparison::None | FiberComparison::Removed => {}
                                 FiberComparison::Added | FiberComparison::Replaced => {
                                     stack.remove_layer(LayerPosition::FromBack(i));
-                                    stack.add_layer(Self::create_view(new_fiber));
+                                    match new_fiber.element.element_type {
+                                        ElementType::FullscreenLayer => {
+                                            stack.add_fullscreen_layer(Self::create_view(
+                                                new_fiber.children.first().unwrap(),
+                                            ));
+                                        }
+                                        ElementType::Layer => {
+                                            stack.add_layer(Self::create_view(
+                                                new_fiber.children.first().unwrap(),
+                                            ));
+                                        }
+                                        _ => panic!("Children of stacks must be layers!"),
+                                    }
                                     stack.move_layer(
                                         LayerPosition::FromFront(0),
                                         LayerPosition::FromBack(i),
@@ -761,7 +897,19 @@ impl React {
                         }
                         None => {
                             // layer is not in the ui; create and insert
-                            stack.add_layer(Self::create_view(new_fiber));
+                            match new_fiber.element.element_type {
+                                ElementType::FullscreenLayer => {
+                                    stack.add_fullscreen_layer(Self::create_view(
+                                        new_fiber.children.first().unwrap(),
+                                    ));
+                                }
+                                ElementType::Layer => {
+                                    stack.add_layer(Self::create_view(
+                                        new_fiber.children.first().unwrap(),
+                                    ));
+                                }
+                                _ => panic!("Children of stacks must be layers!"),
+                            }
                             stack.move_layer(
                                 LayerPosition::FromFront(0),
                                 LayerPosition::FromBack(i),
@@ -777,7 +925,6 @@ impl React {
                 }
             }
             ElementType::Table => {
-                eprintln!("utable");
                 let mut table = view.get_mut();
                 let table = table
                     .get_mut::<ResizedView<TableView<Row, Column>>>()
@@ -835,6 +982,8 @@ impl React {
                 table.set_on_select(move |s, _, _| (on_select)(s));
                 table.set_on_submit(move |s, _, _| (on_submit)(s));
             }
+            ElementType::Leaf | ElementType::Tree => todo!(),
+            ElementType::Menubar => {}
         }
     }
 
@@ -908,7 +1057,7 @@ impl Default for React {
 
 fn main() {
     let react = React::new();
-    react.render(component(stack_app));
+    react.render(component(sisko_app));
 }
 
 fn app(react: &mut React) -> Option<Element> {
@@ -935,12 +1084,49 @@ fn counter(_react: &mut React, props: &CounterProps) -> Option<Element> {
     Some(button(format!("{}", count), on_submit.clone()))
 }
 
-fn sisko_app(_: &mut React) -> Option<Element> {
-    Some(vertical_layout(vec![
+fn sisko_app(react: &mut React) -> Option<Element> {
+    let (show_modal, set_show_modal) = react.use_state(false);
+    let set_show_modal_copy = set_show_modal.clone();
+    let mut layers: Vec<Element> = vec![fullscreen_layer(vertical_layout(vec![
+        menubar(vec![
+            tree(
+                "File",
+                vec![
+                    leaf("Add Folder", Arc::new(|_| {})),
+                    leaf("Add Files", Arc::new(|_| {})),
+                    leaf(
+                        "Exit",
+                        Arc::new(|s| {
+                            s.quit();
+                        }),
+                    ),
+                ],
+            ),
+            tree("Edit", vec![leaf("todo", Arc::new(|_| {}))]),
+            tree("View", vec![leaf("todo", Arc::new(|_| {}))]),
+            tree("Options", vec![leaf("todo", Arc::new(|_| {}))]),
+            tree("Tools", vec![leaf("todo", Arc::new(|_| {}))]),
+            tree("Help", vec![leaf("About", Arc::new(|_| {}))]),
+        ]),
         horizontal_layout(vec![component(left_panel), component(right_panel)]),
         component(bottom_panel),
-        component(bottom_buttons),
-    ]))
+        props_component(
+            bottom_buttons,
+            ButtonProps {
+                on_submit: Arc::new(move |_| set_show_modal(true)),
+            },
+        ),
+    ]))];
+    if show_modal {
+        layers.push(layer(dialog(
+            "Test Modal",
+            vec![button(
+                "Okay".to_string(),
+                Arc::new(move |_| set_show_modal_copy(false)),
+            )],
+        )))
+    }
+    Some(stack(layers))
 }
 
 fn left_panel(_: &mut React) -> Option<Element> {
@@ -981,9 +1167,14 @@ fn bottom_panel(_: &mut React) -> Option<Element> {
     ))))
 }
 
-fn bottom_buttons(_: &mut React) -> Option<Element> {
+struct ButtonProps {
+    on_submit: Arc<Callback>,
+}
+
+fn bottom_buttons(_: &mut React, props: &ButtonProps) -> Option<Element> {
+    let ButtonProps { on_submit } = props;
     Some(horizontal_layout(vec![
-        button(String::from("Add Folder"), Arc::new(Cursive::noop)),
+        button(String::from("Add Folder"), on_submit.clone()),
         button(String::from("Add Files"), Arc::new(Cursive::noop)),
         button(String::from("Cluster"), Arc::new(Cursive::noop)),
         button(String::from("Lookup"), Arc::new(Cursive::noop)),
