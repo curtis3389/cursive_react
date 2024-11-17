@@ -61,8 +61,9 @@ fn left_panel(_: &mut React) -> Option<Element> {
     Some(hideable(panel(table(
         vec![],
         vec![],
-        Arc::new(Cursive::noop),
-        Arc::new(Cursive::noop),
+        None,
+        Arc::new(|_, _| {}),
+        Arc::new(|_, _| {}),
     ))))
 }
 
@@ -70,28 +71,44 @@ fn right_panel(_: &mut React) -> Option<Element> {
     Some(hideable(panel(table(
         vec![],
         vec![],
-        Arc::new(Cursive::noop),
-        Arc::new(Cursive::noop),
+        None,
+        Arc::new(|_, _| {}),
+        Arc::new(|_, _| {}),
     ))))
 }
 
-fn bottom_panel(_: &mut React) -> Option<Element> {
+fn bottom_panel(react: &mut React) -> Option<Element> {
+    let (selected, set_selected) = react.use_state(0usize);
+
     Some(hideable(panel(table(
         vec![
             Column::new("Tag"),
             Column::new("Original Value"),
             Column::new("New Value"),
         ],
-        vec![Row::new(
-            "0",
-            HashMap::from([
-                ("Tag", String::from("Test")),
-                ("Original Value", String::from("orig")),
-                ("New Value", String::from("new")),
-            ]),
-        )],
-        Arc::new(Cursive::noop),
-        Arc::new(Cursive::noop),
+        vec![
+            Row::new(
+                "0",
+                HashMap::from([
+                    ("Tag", String::from("Test")),
+                    ("Original Value", String::from("orig")),
+                    ("New Value", String::from("new")),
+                ]),
+            ),
+            Row::new(
+                "1",
+                HashMap::from([
+                    ("Tag", String::from("Test2")),
+                    ("Original Value", String::from("orig2")),
+                    ("New Value", String::from("new2")),
+                ]),
+            ),
+        ],
+        Some(selected),
+        Arc::new(move |_, index| {
+            set_selected(index);
+        }),
+        Arc::new(|_, _| {}),
     ))))
 }
 

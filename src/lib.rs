@@ -1,3 +1,4 @@
+use anyhow::{anyhow, Result};
 use cursive::align::HAlign;
 use cursive::menu::Tree;
 use cursive::view::{Nameable, Resizable};
@@ -11,7 +12,7 @@ use std::any::Any;
 use std::borrow::BorrowMut;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 use std::sync::{Arc, RwLock};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -96,6 +97,29 @@ pub enum ElementType {
     Table,
     Tree,
     VerticalLayout,
+}
+
+impl Display for ElementType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ElementType::Button => "Button",
+            ElementType::Component(_, _) => "Component",
+            ElementType::Dialog => "Dialog",
+            ElementType::FullscreenLayer => "FullscreenLayer",
+            ElementType::Hideable => "Hideable",
+            ElementType::HorizontalLayout => "HorizontalLayer",
+            ElementType::Layer => "Layer",
+            ElementType::Leaf => "Leaf",
+            ElementType::Menubar => "Menubar",
+            ElementType::Panel => "Panel",
+            ElementType::Resized => "Resized",
+            ElementType::Stack => "Stack",
+            ElementType::Table => "Table",
+            ElementType::Tree => "Tree",
+            ElementType::VerticalLayout => "VerticalLayout",
+        };
+        f.write_str(s)
+    }
 }
 
 impl PartialEq for ElementType {
@@ -213,16 +237,18 @@ pub fn stack(children: Vec<Element>) -> Element {
 pub fn table(
     columns: Vec<Column>,
     rows: Vec<Row>,
-    on_select: Arc<Callback>,
-    on_submit: Arc<Callback>,
+    selected: Option<usize>,
+    on_select: Arc<TableCallback>,
+    on_submit: Arc<TableCallback>,
 ) -> Element {
     Element::new(
         ElementType::Table,
         Props::new()
             .columns(columns)
             .rows(rows)
-            .on_select(on_select)
-            .on_submit(on_submit),
+            .index(selected)
+            .on_table_select(on_select)
+            .on_table_submit(on_submit),
     )
 }
 
@@ -232,14 +258,19 @@ pub fn vertical_layout(children: Vec<Element>) -> Element {
 
 pub type Callback = dyn Fn(&mut Cursive) + Send + Sync;
 
+pub type TableCallback = dyn Fn(&Row, usize) + Send + Sync;
+
 #[derive(Clone)]
 pub struct Props {
     pub children: Vec<Element>,
     pub columns: Option<Vec<Column>>,
     pub component_props: Option<Arc<dyn Any + Send + Sync>>,
+    pub index: Option<usize>,
     pub key: Option<String>,
     pub on_select: Option<Arc<Callback>>,
     pub on_submit: Option<Arc<Callback>>,
+    pub on_table_select: Option<Arc<TableCallback>>,
+    pub on_table_submit: Option<Arc<TableCallback>>,
     pub rows: Option<Vec<Row>>,
     pub title: Option<String>,
 }
@@ -250,9 +281,12 @@ impl Props {
             children: vec![],
             columns: None,
             component_props: None,
+            index: None,
             key: None,
             on_select: None,
             on_submit: None,
+            on_table_select: None,
+            on_table_submit: None,
             rows: None,
             title: None,
         }
@@ -276,6 +310,11 @@ impl Props {
         self
     }
 
+    pub fn index(mut self, index: Option<usize>) -> Self {
+        self.index = index;
+        self
+    }
+
     pub fn key(mut self, key: String) -> Self {
         self.key = Some(key);
         self
@@ -288,6 +327,16 @@ impl Props {
 
     pub fn on_submit(mut self, on_submit: Arc<Callback>) -> Self {
         self.on_submit = Some(on_submit);
+        self
+    }
+
+    pub fn on_table_select(mut self, on_select: Arc<TableCallback>) -> Self {
+        self.on_table_select = Some(on_select);
+        self
+    }
+
+    pub fn on_table_submit(mut self, on_submit: Arc<TableCallback>) -> Self {
+        self.on_table_submit = Some(on_submit);
         self
     }
 
@@ -643,18 +692,64 @@ impl React {
                 let on_select = fiber
                     .element
                     .props
-                    .on_select
+                    .on_table_select
                     .clone()
-                    .unwrap_or(Arc::new(Cursive::noop));
+                    .unwrap_or(Arc::new(|_, _| {}));
                 let on_submit = fiber
                     .element
                     .props
-                    .on_submit
+                    .on_table_submit
                     .clone()
-                    .unwrap_or(Arc::new(Cursive::noop));
-                // TODO: callbacks should receive ref to item
-                table_view.set_on_select(move |s, _, _| (on_select)(s));
-                table_view.set_on_submit(move |s, _, _| (on_submit)(s));
+                    .unwrap_or(Arc::new(|_, _| {}));
+                let name = fiber.name.clone();
+                table_view.set_on_select(move |s, _row, index| {
+                    let row = s
+                        .call_on_name(
+                            name.as_str(),
+                            |table_view: &mut NamedView<BoxedView>| -> Result<Row> {
+                                let mut table_view = table_view.get_mut();
+                                let table_view = table_view
+                                    .get_mut::<ResizedView<TableView<Row, Column>>>()
+                                    .unwrap()
+                                    .get_inner_mut();
+                                let item = table_view
+                                    .borrow_item(index)
+                                    .ok_or_else(|| anyhow!("todo"))?;
+                                Ok(item.clone())
+                            },
+                        )
+                        .ok_or_else(|| anyhow!("todo"))
+                        .and_then(|r| r)
+                        .unwrap();
+                    (on_select)(&row, index);
+                });
+                let name = fiber.name.clone();
+                table_view.set_on_submit(move |s, _row, index| {
+                    let row = s
+                        .call_on_name(
+                            name.as_str(),
+                            |table_view: &mut NamedView<BoxedView>| -> Result<Row> {
+                                let mut table_view = table_view.get_mut();
+                                let table_view = table_view
+                                    .get_mut::<ResizedView<TableView<Row, Column>>>()
+                                    .unwrap()
+                                    .get_inner_mut();
+                                let item = table_view
+                                    .borrow_item(index)
+                                    .ok_or_else(|| anyhow!("todo"))?;
+                                Ok(item.clone())
+                            },
+                        )
+                        .ok_or_else(|| anyhow!("todo"))
+                        .and_then(|r| r)
+                        .unwrap();
+                    (on_submit)(&row, index);
+                });
+
+                if let Some(selected) = fiber.element.props.index {
+                    table_view.set_selected_item(selected);
+                }
+
                 BoxedView::new(Box::new(table_view.full_screen()))
             }
             ElementType::VerticalLayout => {
@@ -848,7 +943,8 @@ impl React {
                 for i in 0..new_fibers.len() {
                     let new_fiber = &new_fibers[i];
                     let old_fiber = old_fibers.iter().find(|f| f.name == new_fiber.name);
-                    let current_index = stack.find_layer_from_name(new_fiber.name.as_str());
+                    let current_index =
+                        stack.find_layer_from_name(new_fiber.children[0].name.as_str());
                     match current_index {
                         Some(position) => {
                             // layer is in the ui, make sure it's ordered right and update
@@ -863,11 +959,6 @@ impl React {
                                 );
                             }
 
-                            let layer = stack
-                                .get_mut(LayerPosition::FromBack(i))
-                                .unwrap()
-                                .downcast_mut::<NamedView<BoxedView>>()
-                                .unwrap();
                             match old_fiber.compare(&Some(new_fiber)) {
                                 FiberComparison::None | FiberComparison::Removed => {}
                                 FiberComparison::Added | FiberComparison::Replaced => {
@@ -891,7 +982,73 @@ impl React {
                                     );
                                 }
                                 FiberComparison::Updated => {
-                                    Self::update_view(layer, old_fiber.unwrap(), new_fiber)
+                                    let old_child_fiber = old_fiber.map(|f| &f.children[0]);
+                                    let new_child_fiber = &new_fiber.children[0];
+                                    match new_fiber.element.element_type {
+                                        ElementType::Layer => {
+                                            match old_child_fiber.compare(&Some(new_child_fiber)) {
+                                                FiberComparison::Added
+                                                | FiberComparison::Replaced => {
+                                                    stack.remove_layer(LayerPosition::FromBack(i));
+                                                    stack.add_layer(Self::create_view(
+                                                        &new_child_fiber,
+                                                    ));
+                                                    stack.move_layer(
+                                                        LayerPosition::FromFront(0),
+                                                        LayerPosition::FromBack(i),
+                                                    );
+                                                }
+                                                FiberComparison::None
+                                                | FiberComparison::Removed => {
+                                                    stack.remove_layer(LayerPosition::FromBack(i));
+                                                }
+                                                FiberComparison::Updated => {
+                                                    let layer = stack
+                                                        .get_mut(LayerPosition::FromBack(i))
+                                                        .unwrap()
+                                                        .downcast_mut::<NamedView<BoxedView>>()
+                                                        .unwrap();
+                                                    Self::update_view(
+                                                        layer,
+                                                        old_child_fiber.as_ref().unwrap(),
+                                                        &new_child_fiber,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        ElementType::FullscreenLayer => {
+                                            match old_child_fiber.compare(&Some(new_child_fiber)) {
+                                                FiberComparison::Added
+                                                | FiberComparison::Replaced => {
+                                                    stack.remove_layer(LayerPosition::FromBack(i));
+                                                    stack.add_fullscreen_layer(Self::create_view(
+                                                        new_child_fiber,
+                                                    ));
+                                                    stack.move_layer(
+                                                        LayerPosition::FromFront(0),
+                                                        LayerPosition::FromBack(i),
+                                                    );
+                                                }
+                                                FiberComparison::None
+                                                | FiberComparison::Removed => {
+                                                    stack.remove_layer(LayerPosition::FromBack(i));
+                                                }
+                                                FiberComparison::Updated => {
+                                                    let layer = stack
+                                                        .get_mut(LayerPosition::FromBack(i))
+                                                        .unwrap()
+                                                        .downcast_mut::<NamedView<BoxedView>>()
+                                                        .unwrap();
+                                                    Self::update_view(
+                                                        layer,
+                                                        old_child_fiber.as_ref().unwrap(),
+                                                        new_child_fiber,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        _ => panic!("Children of stacks must be layers!"),
+                                    }
                                 }
                             }
                         }
@@ -970,17 +1127,63 @@ impl React {
                 let on_select = new_fiber
                     .element
                     .props
-                    .on_select
+                    .on_table_select
                     .clone()
-                    .unwrap_or(Arc::new(Cursive::noop));
+                    .unwrap_or(Arc::new(|_, _| {}));
                 let on_submit = new_fiber
                     .element
                     .props
-                    .on_submit
+                    .on_table_submit
                     .clone()
-                    .unwrap_or(Arc::new(Cursive::noop));
-                table.set_on_select(move |s, _, _| (on_select)(s));
-                table.set_on_submit(move |s, _, _| (on_submit)(s));
+                    .unwrap_or(Arc::new(|_, _| {}));
+                let name = new_fiber.name.clone();
+                table.set_on_select(move |s, _row, index| {
+                    let row = s
+                        .call_on_name(
+                            name.as_str(),
+                            |table_view: &mut NamedView<BoxedView>| -> Result<Row> {
+                                let mut table_view = table_view.get_mut();
+                                let table_view = table_view
+                                    .get_mut::<ResizedView<TableView<Row, Column>>>()
+                                    .unwrap()
+                                    .get_inner_mut();
+                                let item = table_view
+                                    .borrow_item(index)
+                                    .ok_or_else(|| anyhow!("todo"))?;
+                                Ok(item.clone())
+                            },
+                        )
+                        .ok_or_else(|| anyhow!("todo"))
+                        .and_then(|r| r)
+                        .unwrap();
+                    (on_select)(&row, index);
+                });
+                let name = new_fiber.name.clone();
+                table.set_on_submit(move |s, _row, index| {
+                    let row = s
+                        .call_on_name(
+                            name.as_str(),
+                            |table_view: &mut NamedView<BoxedView>| -> Result<Row> {
+                                let mut table_view = table_view.get_mut();
+                                let table_view = table_view
+                                    .get_mut::<ResizedView<TableView<Row, Column>>>()
+                                    .unwrap()
+                                    .get_inner_mut();
+                                let item = table_view
+                                    .borrow_item(index)
+                                    .ok_or_else(|| anyhow!("todo"))?;
+                                Ok(item.clone())
+                            },
+                        )
+                        .ok_or_else(|| anyhow!("todo"))
+                        .and_then(|r| r)
+                        .unwrap();
+                    (on_submit)(&row, index);
+                });
+
+                if let Some(selected) = new_fiber.element.props.index {
+                    table.set_selected_item(selected);
+                }
             }
             ElementType::Leaf | ElementType::Tree => todo!(),
             ElementType::Menubar => {}
