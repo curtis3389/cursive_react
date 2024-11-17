@@ -258,7 +258,7 @@ pub fn vertical_layout(children: Vec<Element>) -> Element {
 
 pub type Callback = dyn Fn(&mut Cursive) + Send + Sync;
 
-pub type TableCallback = dyn Fn(&Row, usize) + Send + Sync;
+pub type TableCallback = dyn Fn(Row, usize) + Send + Sync;
 
 #[derive(Clone)]
 pub struct Props {
@@ -721,7 +721,7 @@ impl React {
                         .ok_or_else(|| anyhow!("todo"))
                         .and_then(|r| r)
                         .unwrap();
-                    (on_select)(&row, index);
+                    (on_select)(row, index);
                 });
                 let name = fiber.name.clone();
                 table_view.set_on_submit(move |s, _row, index| {
@@ -743,7 +743,7 @@ impl React {
                         .ok_or_else(|| anyhow!("todo"))
                         .and_then(|r| r)
                         .unwrap();
-                    (on_submit)(&row, index);
+                    (on_submit)(row, index);
                 });
 
                 if let Some(selected) = fiber.element.props.index {
@@ -1156,7 +1156,7 @@ impl React {
                         .ok_or_else(|| anyhow!("todo"))
                         .and_then(|r| r)
                         .unwrap();
-                    (on_select)(&row, index);
+                    (on_select)(row, index);
                 });
                 let name = new_fiber.name.clone();
                 table.set_on_submit(move |s, _row, index| {
@@ -1178,7 +1178,7 @@ impl React {
                         .ok_or_else(|| anyhow!("todo"))
                         .and_then(|r| r)
                         .unwrap();
-                    (on_submit)(&row, index);
+                    (on_submit)(row, index);
                 });
 
                 if let Some(selected) = new_fiber.element.props.index {
