@@ -46,8 +46,8 @@ impl Column {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Row {
-    data: HashMap<&'static str, String>,
-    id: String,
+    pub data: HashMap<&'static str, String>,
+    pub id: String,
 }
 
 impl Row {
