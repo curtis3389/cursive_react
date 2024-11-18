@@ -1090,7 +1090,7 @@ impl React {
 
                 // TODO: reconcile columns?
                 // reconcile rows
-                let mut to_remove: Vec<usize> = vec![];
+                /*let mut to_remove: Vec<usize> = vec![];
                 let mut updated: Vec<String> = vec![];
                 for (index, item) in table.borrow_items_mut().iter_mut().enumerate() {
                     let new_row = new_fiber
@@ -1110,16 +1110,9 @@ impl React {
                 }
                 for index in to_remove {
                     table.remove_item(index);
-                }
-                for new_row in new_fiber
-                    .element
-                    .props
-                    .rows
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .filter(|row| !updated.iter().any(|s| *s == row.id))
-                {
+                }*/
+                table.clear();
+                for new_row in new_fiber.element.props.rows.as_ref().unwrap() {
                     table.insert_item(new_row.clone());
                 }
 
