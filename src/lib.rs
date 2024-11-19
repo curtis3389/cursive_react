@@ -375,7 +375,7 @@ impl Element {
         let element = match &self.element_type {
             ElementType::Component(_, component) => {
                 react.element_key.clone_from(&name);
-                react.state_index = 0;
+                react.hook_index = 0;
                 match &self.props.component_props {
                     Some(props) => component(react, props.as_ref()),
                     None => component(react, &()),
@@ -441,11 +441,22 @@ pub struct Fiber {
     pub name: String,
 }
 
+pub type EmptyCallback = Arc<dyn Fn() + Send + Sync + 'static>;
+pub type EffectCallback = Arc<dyn Fn() -> EmptyCallback + Send + Sync + 'static>;
+
+struct EffectValue {
+    pub callback: EffectCallback,
+    pub cleanup: EmptyCallback,
+    pub dependencies: Vec<String>,
+    pub needs_run: bool,
+}
+
 type StateValue = dyn std::any::Any + Send + Sync;
 
 pub struct React {
+    effects: Arc<RwLock<HashMap<String, EffectValue>>>,
     element_key: String,
-    state_index: usize,
+    hook_index: usize,
     state: Arc<RwLock<HashMap<String, Box<StateValue>>>>,
     root: Option<Element>,
     old_root: Option<Fiber>,
@@ -455,8 +466,9 @@ pub struct React {
 impl React {
     pub fn new() -> Self {
         Self {
+            effects: Arc::new(RwLock::new(HashMap::new())),
             element_key: String::new(),
-            state_index: 0,
+            hook_index: 0,
             state: Arc::new(RwLock::new(HashMap::new())),
             root: None,
             old_root: None,
@@ -512,6 +524,13 @@ impl React {
         }
 
         self.old_root = new_root;
+
+        let mut effects = self.effects.as_ref().write().unwrap();
+        for (_, effect) in effects.iter_mut().filter(|(_, e)| e.needs_run) {
+            (effect.cleanup)();
+            effect.cleanup = (effect.callback)();
+            effect.needs_run = false;
+        }
     }
 
     fn create_view(fiber: &Fiber) -> NamedView<BoxedView> {
@@ -1239,10 +1258,105 @@ impl React {
     where
         T: Clone + Send + Sync + 'static,
     {
-        let key = format!("{}.{}", self.element_key, self.state_index);
-        self.state_index += 1;
+        let key = format!("{}.{}", self.element_key, self.hook_index);
+        self.hook_index += 1;
         self.use_context(key, initial_value)
     }
+
+    pub fn use_effect(&mut self, callback: EffectCallback, dependencies: Vec<String>) {
+        let key = format!("{}.{}", self.element_key, self.hook_index);
+        self.hook_index += 1;
+
+        let new_hook = {
+            let effects = self.effects.as_ref().read().unwrap();
+            let old_hook = effects.get(&key);
+
+            let has_changed = match old_hook {
+                Some(old_hook) => dependencies
+                    .iter()
+                    .enumerate()
+                    .any(|(i, s)| old_hook.dependencies[i] != *s),
+                None => true,
+            };
+            EffectValue {
+                callback,
+                cleanup: match old_hook {
+                    Some(old_hook) => old_hook.cleanup.clone(),
+                    None => Arc::new(|| {}),
+                },
+                dependencies,
+                needs_run: has_changed,
+            }
+        };
+
+        self.effects.as_ref().write().unwrap().insert(key, new_hook);
+    }
+
+    /*
+        let wipFiber = null;
+    let hookIndex = null;
+
+    function updateFunctionComponent(fiber) {
+      wipFiber = fiber;
+      hookIndex = 0;
+      wipFiber.hooks = [];
+      wipFiber.effects = []; // Initialize effects array
+      const children = [fiber.type(fiber.props)];
+      reconcileChildren(fiber, children);
+    }
+
+
+        function useEffect(callback, dependencies) {
+      const oldHook =
+        wipFiber.alternate &&
+        wipFiber.alternate.hooks &&
+        wipFiber.alternate.hooks[hookIndex];
+
+      const hasChanged =
+        !oldHook ||
+        dependencies.some((dep, i) => dep !== oldHook.dependencies[i]);
+
+      if (hasChanged) {
+        // If dependencies have changed, we need to run the effect
+        wipFiber.effects.push({
+          cleanup: oldHook ? oldHook.cleanup : undefined,
+          callback,
+        });
+      }
+
+      // Store the current dependencies for the next render
+      const effectHook = {
+        dependencies,
+        cleanup: undefined,
+      };
+
+      if (oldHook) {
+        effectHook.cleanup = oldHook.cleanup;
+      }
+
+      wipFiber.hooks.push(effectHook);
+      hookIndex++;
+    }
+
+
+        function commitRoot() {
+      deletions.forEach(commitWork);
+      commitWork(wipRoot.child);
+      currentRoot = wipRoot;
+      wipRoot = null;
+
+      // Execute effects after the commit
+      if (currentRoot) {
+        currentRoot.effects.forEach(effect => {
+          if (effect.cleanup) {
+            effect.cleanup(); // Cleanup previous effect if it exists
+          }
+          effect.cleanup = effect.callback(); // Call the effect and store the cleanup function
+        });
+      }
+    }
+
+        */
 }
 
 impl Default for React {
